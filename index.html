@@ -133,77 +133,124 @@
 </body>
 </html>
 <!DOCTYPE html>
-<html>
+<html lang="en">
 <head>
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>IMU Sensor Diagnostic</title>
   <style>
-    body { font-family: sans-serif; text-align: center; background: #1c1c1e; color: white; }
-    #canvasContainer { width: 90%; max-width: 500px; margin: 20px auto; }
-    canvas { background: #2c2c2e; border-radius: 10px; width: 100%; height: 200px; }
+    body { font-family: -apple-system, sans-serif; background: #111; color: #fff; padding: 15px; text-align: center; }
+    button { background: #007aff; color: white; border: none; padding: 12px 24px; font-size: 16px; border-radius: 8px; font-weight: bold; margin-bottom: 15px; }
+    #status { font-family: monospace; background: #222; padding: 10px; border-radius: 6px; color: #34c759; text-align: left; font-size: 13px; max-height: 120px; overflow-y: auto; }
+    canvas { background: #1c1c1e; border-radius: 8px; width: 100%; height: 180px; margin-top: 15px; }
   </style>
 </head>
 <body>
 
-  <h3>Real-Time Lumbar Kinematics</h3>
-  <div id="canvasContainer">
-    <canvas id="liveGraph" width="500" height="200"></canvas>
-  </div>
+  <h2>IMU Sensor Telemetry</h2>
+  <button id="startBtn">Start Motion Sensor Logging</button>
+
+  <div id="status">Status: Waiting for user to tap Start...</div>
+  <canvas id="liveCanvas" width="500" height="180"></canvas>
 
   <script>
-    const canvas = document.getElementById('liveGraph');
+    const statusDiv = document.getElementById('status');
+    const startBtn = document.getElementById('startBtn');
+    const canvas = document.getElementById('liveCanvas');
     const ctx = canvas.getContext('2d');
-    
-    // Rolling buffer: 120 points = 2 seconds of data at 60 Hz
-    const maxPoints = 120;
-    let buffer = new Array(maxPoints).fill(0);
 
-    // 1. Decoupled Sensor Data Collection
-    window.addEventListener('devicemotion', (event) => {
-      if (event.rotationRate) {
-        // Gyroscope Y-axis in deg/s (or convert from rad/s)
-        const gyroY = event.rotationRate.beta || 0; 
-        buffer.push(gyroY);
-        if (buffer.length > maxPoints) buffer.shift();
+    const maxPoints = 120;
+    const dataBuffer = new Array(maxPoints).fill(0);
+    let isLogging = false;
+
+    function logStatus(msg) {
+      statusDiv.innerHTML += `<br>> ${msg}`;
+      statusDiv.scrollTop = statusDiv.scrollHeight;
+    }
+
+    // 1. Explicit iOS & Android Permission Handler
+    startBtn.addEventListener('click', async () => {
+      // Protocol Check
+      if (location.protocol !== 'https:' && location.hostname !== 'localhost') {
+        logStatus('ERROR: Motion sensors require HTTPS connection!');
+        alert('Sensors blocked! You must host this page on HTTPS (e.g., GitHub Pages).');
+        return;
+      }
+
+      // iOS 13+ Permission API Check
+      if (typeof DeviceMotionEvent !== 'undefined' && typeof DeviceMotionEvent.requestPermission === 'function') {
+        try {
+          const response = await DeviceMotionEvent.requestPermission();
+          if (response === 'granted') {
+            logStatus('iOS Permission: Granted!');
+            initSensorListener();
+          } else {
+            logStatus('iOS Permission: DENIED by user.');
+          }
+        } catch (err) {
+          logStatus('Permission Error: ' + err.message);
+        }
+      } else if ('DeviceMotionEvent' in window) {
+        // Non-iOS or older Android browsers
+        logStatus('Standard Browser API Detected. Initializing...');
+        initSensorListener();
+      } else {
+        logStatus('ERROR: DeviceMotionEvent API not supported on this device.');
       }
     });
 
-    // 2. High-Performance 60 FPS Canvas Rendering Loop
-    function renderGraph() {
-      ctx.clearRect(0, 0, canvas.width, canvas.height);
-      
-      // Draw Target Smoothness / Speed Threshold Zone (Green Box)
-      ctx.fillStyle = 'rgba(52, 199, 89, 0.15)';
-      ctx.fillRect(0, 40, canvas.width, 60); // Visual target target zone
+    // 2. Data Producer (Decoupled Hardware Listener)
+    function initSensorListener() {
+      if (isLogging) return;
+      isLogging = true;
+      startBtn.style.display = 'none';
 
-      // Draw Zero Line
-      ctx.strokeStyle = '#555';
-      ctx.lineWidth = 1;
+      let sampleCount = 0;
+      window.addEventListener('devicemotion', (event) => {
+        const rate = event.rotationRate;
+        if (rate && (rate.alpha !== null || rate.beta !== null || rate.gamma !== null)) {
+          sampleCount++;
+          if (sampleCount === 1) logStatus('STREAMING DATA: Sensor events firing!');
+
+          // Capture Gyro Beta (X-axis pitch speed)
+          const val = rate.beta || 0;
+          dataBuffer.push(val);
+          if (dataBuffer.length > maxPoints) dataBuffer.shift();
+        } else {
+          if (sampleCount === 0) logStatus('WARNING: Receiving motion events, but rotationRate is NULL.');
+        }
+      });
+    }
+
+    // 3. UI Consumer (V-Sync Decoupled Graph Render Loop)
+    function draw() {
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+      // Center baseline
+      ctx.strokeStyle = '#444';
       ctx.beginPath();
       ctx.moveTo(0, canvas.height / 2);
       ctx.lineTo(canvas.width, canvas.height / 2);
       ctx.stroke();
 
-      // Draw Real-Time Signal Line
-      ctx.strokeStyle = '#007aff';
-      ctx.lineWidth = 3;
-      ctx.beginPath();
-
-      for (let i = 0; i < buffer.length; i++) {
-        const x = (i / (maxPoints - 1)) * canvas.width;
-        // Scale factor: Center y-axis at canvas.height/2
-        const y = (canvas.height / 2) - (buffer[i] * 1.5); 
-        
-        if (i === 0) ctx.moveTo(x, y);
-        else ctx.lineTo(x, y);
+      // Render Telemetry Line
+      if (isLogging) {
+        ctx.strokeStyle = '#30d158';
+        ctx.lineWidth = 2.5;
+        ctx.beginPath();
+        for (let i = 0; i < dataBuffer.length; i++) {
+          const x = (i / (maxPoints - 1)) * canvas.width;
+          const y = (canvas.height / 2) - (dataBuffer[i] * 1.5);
+          if (i === 0) ctx.moveTo(x, y);
+          else ctx.lineTo(x, y);
+        }
+        ctx.stroke();
       }
-      ctx.stroke();
 
-      // Request next animation frame (synchronized with browser refresh rate)
-      requestAnimationFrame(renderGraph);
+      requestAnimationFrame(draw);
     }
 
-    // Start rendering loop
-    requestAnimationFrame(renderGraph);
+    // Start render loop
+    requestAnimationFrame(draw);
   </script>
 </body>
 </html>
