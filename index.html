@@ -3,246 +3,254 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Lumbar Kinematics Logger & Biofeedback</title>
+  <title>Browser Gyroscope Sensor Logger</title>
   <style>
-    :root { --bg: #000; --card: #1c1c1e; --accent: #0a84ff; --green: #30d158; --red: #ff453a; }
-    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: var(--bg); color: #fff; margin: 0; padding: 16px; text-align: center; }
-    .container { max-width: 500px; margin: 0 auto; }
-    
-    /* Control Buttons */
-    .btn-group { display: flex; gap: 10px; margin-bottom: 15px; }
-    button { flex: 1; padding: 14px; border: none; border-radius: 12px; font-size: 15px; font-weight: 600; cursor: pointer; color: white; transition: opacity 0.2s; }
-    #permBtn { background: var(--accent); }
-    #recBtn { background: var(--green); display: none; }
-    #stopBtn { background: var(--red); display: none; }
-    button:disabled { opacity: 0.4; cursor: not-allowed; }
-
-    /* Telemetry Metric Cards */
-    .dashboard { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-bottom: 15px; }
-    .card { background: var(--card); padding: 14px; border-radius: 12px; text-align: left; }
-    .card-title { font-size: 11px; text-transform: uppercase; color: #8e8e93; letter-spacing: 0.5px; }
-    .card-value { font-size: 24px; font-weight: 700; margin-top: 4px; font-family: monospace; }
-
-    /* Live Graph Canvas */
-    canvas { background: var(--card); border-radius: 12px; width: 100%; height: 220px; display: block; }
-    #status { font-size: 12px; color: #8e8e93; margin-top: 10px; font-family: monospace; }
+    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; padding: 20px; background-color: #f4f6f8; color: #333; }
+    .card { background: #fff; padding: 24px; border-radius: 14px; box-shadow: 0 4px 12px rgba(0,0,0,0.1); max-width: 400px; margin: 0 auto; }
+    h2 { margin-top: 0; font-size: 1.2rem; text-align: center; color: #111; }
+    .metric { display: flex; justify-content: space-between; padding: 10px 0; border-bottom: 1px solid #eee; font-family: monospace; font-size: 1rem; }
+    .btn-group { display: flex; gap: 10px; margin-top: 20px; }
+    button { flex: 1; padding: 12px; border: none; border-radius: 8px; font-weight: bold; font-size: 0.95rem; cursor: pointer; }
+    #btnStart { background-color: #007aff; color: white; }
+    #btnStop { background-color: #ff3b30; color: white; opacity: 0.5; }
+    #btnExport { background-color: #34c759; color: white; margin-top: 12px; width: 100%; display: none; }
+    .status { text-align: center; font-size: 0.85rem; margin-top: 14px; color: #666; }
   </style>
 </head>
 <body>
 
-<div class="container">
-  <!-- Controls -->
+<div class="card">
+  <h2>Gyroscope Telemetry Logger</h2>
+  
+  <div class="metric"><span>Rotation Alpha (Z):</span><span id="rotAlpha">0.00 °/s</span></div>
+  <div class="metric"><span>Rotation Beta (X):</span><span id="rotBeta">0.00 °/s</span></div>
+  <div class="metric"><span>Rotation Gamma (Y):</span><span id="rotGamma">0.00 °/s</span></div>
+  <div class="metric"><span>Total Samples:</span><span id="sampleCount">0</span></div>
+
   <div class="btn-group">
-    <button id="permBtn">1. Enable Sensors</button>
-    <button id="recBtn">2. Start Session</button>
-    <button id="stopBtn">3. Stop & Save CSV</button>
+    <button id="btnStart" onclick="startLogging()">Start Recording</button>
+    <button id="btnStop" onclick="stopLogging()" disabled>Stop</button>
   </div>
+  <button id="btnExport" onclick="exportCSV()">Export CSV Data</button>
 
-  <!-- Real-Time Metrics Display -->
-  <div class="dashboard">
-    <div class="card">
-      <div class="card-title">Angular Speed</div>
-      <div class="card-value" id="valSpeed">0.0 <span style="font-size:12px">deg/s</span></div>
-    </div>
-    <div class="card">
-      <div class="card-title">Instant 3D Jerk</div>
-      <div class="card-value" id="valJerk" style="color: var(--green);">0.0 <span style="font-size:12px">rad/s³</span></div>
-    </div>
-  </div>
-
-  <!-- Decoupled Live Canvas Graph -->
-  <canvas id="liveCanvas" width="500" height="220"></canvas>
-  <div id="status">System Ready. HTTPS Connection Active.</div>
+  <div class="status" id="statusMsg">Tap "Start Recording" to grant permission and log data.</div>
 </div>
 
 <script>
-  // DOM Elements
-  const permBtn = document.getElementById('permBtn');
-  const recBtn = document.getElementById('recBtn');
-  const stopBtn = document.getElementById('stopBtn');
-  const valSpeed = document.getElementById('valSpeed');
-  const valJerk = document.getElementById('valJerk');
-  const statusDiv = document.getElementById('status');
-  const canvas = document.getElementById('liveCanvas');
-  const ctx = canvas.getContext('2d');
-
-  // Buffers & Data State
-  const maxBuffer = 120; // 2 seconds of graph data at 60Hz
-  const velocityBuffer = new Array(maxBuffer).fill(0);
-  const jerkBuffer = new Array(maxBuffer).fill(0);
-  let csvRows = [];
   let isRecording = false;
+  let loggedData = []; // Array of [Time_sec, Alpha, Beta, Gamma]
+  let startTime = 0;
 
-  // Kinematic Numerical Differentiation Memory Variables
-  let lastTime = null;
-  let lastGyro = { x: 0, y: 0, z: 0 };
-  let lastAccel = { x: 0, y: 0, z: 0 };
-  let currentSpeedDeg = 0;
-  let currentJerkRad = 0;
-
-  const DEG2RAD = Math.PI / 180;
-
-  // 1. Permission Unlocking
-  permBtn.addEventListener('click', async () => {
-    if (location.protocol !== 'https:' && location.hostname !== 'localhost') {
-      statusDiv.textContent = 'ERROR: Sensor access requires an HTTPS link!';
-      alert('Sensors require HTTPS! Please host on GitHub Pages.');
-      return;
-    }
-
+  async function startLogging() {
+    // 1. Request Explicit Sensor Permission for iOS Safari (User-gesture required)
     if (typeof DeviceMotionEvent !== 'undefined' && typeof DeviceMotionEvent.requestPermission === 'function') {
       try {
         const response = await DeviceMotionEvent.requestPermission();
-        if (response === 'granted') initializeSensors();
-        else statusDiv.textContent = 'Permission denied by user.';
-      } catch (err) { statusDiv.textContent = 'Auth error: ' + err.message; }
-    } else {
-      initializeSensors();
-    }
-  });
-
-  function initializeSensors() {
-    window.addEventListener('devicemotion', processSensorFrame);
-    permBtn.style.display = 'none';
-    recBtn.style.display = 'block';
-    statusDiv.textContent = 'Sensors Live. Ready to record session.';
-  }
-
-  // 2. Data Producer & Kinematic Differentiation Engine (Decoupled from UI)
-  function processSensorFrame(e) {
-    const now = performance.now();
-    if (!lastTime) {
-      lastTime = now;
-      if (e.rotationRate) lastGyro = { x: e.rotationRate.alpha||0, y: e.rotationRate.beta||0, z: e.rotationRate.gamma||0 };
-      return;
+        if (response !== 'granted') {
+          document.getElementById('statusMsg').innerText = "Permission denied for motion sensors.";
+          return;
+        }
+      } catch (error) {
+        console.error(error);
+        document.getElementById('statusMsg').innerText = "Error requesting motion sensor permissions.";
+        return;
+      }
     }
 
-    const dt = (now - lastTime) / 1000; // Convert to seconds
-    if (dt <= 0) return;
-
-    // Fetch Gyro Data (deg/s)
-    const rate = e.rotationRate || { alpha: 0, beta: 0, gamma: 0 };
-    const gx = rate.alpha || 0;
-    const gy = rate.beta || 0;
-    const gz = rate.gamma || 0;
-
-    // Total Angular Velocity Magnitude (deg/s)
-    currentSpeedDeg = Math.sqrt(gx*gx + gy*gy + gz*gz);
-
-    // Calculate Angular Acceleration (rad/s²)
-    const ax = ((gx - lastGyro.x) * DEG2RAD) / dt;
-    const ay = ((gy - lastGyro.y) * DEG2RAD) / dt;
-    const az = ((gz - lastGyro.z) * DEG2RAD) / dt;
-
-    // Calculate Angular Jerk (rad/s³)
-    const jx = (ax - lastAccel.x) / dt;
-    const jy = (ay - lastAccel.y) / dt;
-    const jz = (az - lastAccel.z) / dt;
-
-    // Total 3D Vector Jerk Magnitude (rad/s³)
-    currentJerkRad = Math.sqrt(jx*jx + jy*jy + jz*jz);
-
-    // Update Numerical Memories
-    lastTime = now;
-    lastGyro = { x: gx, y: gy, z: gz };
-    lastAccel = { x: ax, y: ay, z: az };
-
-    // Push to Graph Buffers
-    velocityBuffer.push(currentSpeedDeg);
-    if (velocityBuffer.length > maxBuffer) velocityBuffer.shift();
-
-    jerkBuffer.push(currentJerkRad);
-    if (jerkBuffer.length > maxBuffer) jerkBuffer.shift();
-
-    // Log to CSV Array if active recording session
-    if (isRecording) {
-      csvRows.push([
-        now.toFixed(2),
-        dt.toFixed(4),
-        gx.toFixed(3),
-        gy.toFixed(3),
-        gz.toFixed(3),
-        currentSpeedDeg.toFixed(3),
-        currentJerkRad.toFixed(3)
-      ]);
-    }
-  }
-
-  // 3. UI Recording Controls & Automated CSV Export
-  recBtn.addEventListener('click', () => {
+    // 2. Initialize Recording State
+    loggedData = [];
+    startTime = performance.now();
     isRecording = true;
-    csvRows = [['Timestamp_ms', 'DeltaTime_s', 'GyroX_degs', 'GyroY_degs', 'GyroZ_degs', 'Speed_degs', 'Jerk3D_rads3']];
-    recBtn.style.display = 'none';
-    stopBtn.style.display = 'block';
-    statusDiv.textContent = 'RECORDING... Data logging active.';
-  });
 
-  stopBtn.addEventListener('click', () => {
+    // 3. Attach Motion Listener
+    window.addEventListener('devicemotion', handleMotion);
+
+    // 4. Update UI Buttons
+    document.getElementById('btnStart').disabled = true;
+    document.getElementById('btnStart').style.opacity = '0.5';
+    document.getElementById('btnStop').disabled = false;
+    document.getElementById('btnStop').style.opacity = '1';
+    document.getElementById('btnExport').style.display = 'none';
+    document.getElementById('statusMsg').innerText = "Recording live gyroscope data...";
+  }
+
+  function handleMotion(event) {
+    if (!isRecording) return;
+
+    // Read angular velocity (deg/s) around Z (alpha), X (beta), and Y (gamma) axes
+    const rot = event.rotationRate || { alpha: 0, beta: 0, gamma: 0 };
+    const alpha = (rot.alpha || 0).toFixed(3);
+    const beta = (rot.beta || 0).toFixed(3);
+    const gamma = (rot.gamma || 0).toFixed(3);
+    const timeSec = ((performance.now() - startTime) / 1000).toFixed(3);
+
+    // Update Live Telemetry
+    document.getElementById('rotAlpha').innerText = alpha + " °/s";
+    document.getElementById('rotBeta').innerText = beta + " °/s";
+    document.getElementById('rotGamma').innerText = gamma + " °/s";
+
+    // Buffer Sample
+    loggedData.push([timeSec, alpha, beta, gamma]);
+    document.getElementById('sampleCount').innerText = loggedData.length;
+  }
+
+  function stopLogging() {
     isRecording = false;
-    stopBtn.style.display = 'none';
-    recBtn.style.display = 'block';
-    statusDiv.textContent = `Session Stopped. Exporting ${csvRows.length - 1} records...`;
+    window.removeEventListener('devicemotion', handleMotion);
 
-    // Generate CSV File Download
-    const csvContent = "data:text/csv;charset=utf-8," + csvRows.map(e => e.join(",")).join("\n");
+    // Update UI Controls
+    document.getElementById('btnStart').disabled = false;
+    document.getElementById('btnStart').style.opacity = '1';
+    document.getElementById('btnStop').disabled = true;
+    document.getElementById('btnStop').style.opacity = '0.5';
+
+    if (loggedData.length > 0) {
+      document.getElementById('btnExport').style.display = 'block';
+      document.getElementById('statusMsg').innerText = `Stopped. ${loggedData.length} samples collected.`;
+    } else {
+      document.getElementById('statusMsg').innerText = "Stopped. No sensor data detected.";
+    }
+  }
+
+  function exportCSV() {
+    if (loggedData.length === 0) return;
+
+    let csvContent = "data:text/csv;charset=utf-8,Timestamp_sec,Gyro_Alpha_deg_s,Gyro_Beta_deg_s,Gyro_Gamma_deg_s\n";
+    loggedData.forEach(row => {
+      csvContent += row.join(",") + "\n";
+    });
+
     const encodedUri = encodeURI(csvContent);
     const link = document.createElement("a");
     link.setAttribute("href", encodedUri);
-    link.setAttribute("download", `Jerk_Trial_${Date.now()}.csv`);
+    link.setAttribute("download", `gyroscope_data_${Date.now()}.csv`);
     document.body.appendChild(link);
     link.click();
     document.body.removeChild(link);
-  });
-
-  // 4. UI Consumer: 60 FPS Canvas Graph & Dashboard Rendering Loop
-  function renderLoop() {
-    // A. Update HTML Metric Displays
-    valSpeed.textContent = currentSpeedDeg.toFixed(1);
-    valJerk.textContent = currentJerkRad.toFixed(1);
-    
-    // Color Feedback based on Smoothness Threshold (Green: <30 rad/s³, Red: >=30 rad/s³)
-    if (currentJerkRad > 30) {
-      valJerk.style.color = 'var(--red)';
-    } else {
-      valJerk.style.color = 'var(--green)';
-    }
-
-    // B. Draw Live Canvas Graph
-    ctx.clearRect(0, 0, canvas.width, canvas.height);
-
-    // Green Target Biofeedback Zone (Smooth Movement Region)
-    ctx.fillStyle = 'rgba(48, 209, 88, 0.1)';
-    ctx.fillRect(0, canvas.height - 100, canvas.width, 80);
-
-    // Render Angular Speed Signal Line (Blue)
-    ctx.strokeStyle = '#0a84ff';
-    ctx.lineWidth = 2;
-    ctx.beginPath();
-    for (let i = 0; i < velocityBuffer.length; i++) {
-      const x = (i / (maxBuffer - 1)) * canvas.width;
-      const y = canvas.height - (velocityBuffer[i] * 1.2) - 10;
-      if (i === 0) ctx.moveTo(x, y);
-      else ctx.lineTo(x, y);
-    }
-    ctx.stroke();
-
-    // Render Instantaneous Jerk Overlay Line (Orange)
-    ctx.strokeStyle = '#ff9f0a';
-    ctx.lineWidth = 1.5;
-    ctx.beginPath();
-    for (let i = 0; i < jerkBuffer.length; i++) {
-      const x = (i / (maxBuffer - 1)) * canvas.width;
-      const y = canvas.height - (jerkBuffer[i] * 2.5) - 10;
-      if (i === 0) ctx.moveTo(x, y);
-      else ctx.lineTo(x, y);
-    }
-    ctx.stroke();
-
-    requestAnimationFrame(renderLoop);
   }
-
-  // Start smooth rendering engine
-  requestAnimationFrame(renderLoop);
 </script>
+
+</body>
+</html>
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>IMU Sensor Diagnostic</title>
+  <style>
+    body { font-family: -apple-system, sans-serif; background: #111; color: #fff; padding: 15px; text-align: center; }
+    button { background: #007aff; color: white; border: none; padding: 12px 24px; font-size: 16px; border-radius: 8px; font-weight: bold; margin-bottom: 15px; }
+    #status { font-family: monospace; background: #222; padding: 10px; border-radius: 6px; color: #34c759; text-align: left; font-size: 13px; max-height: 120px; overflow-y: auto; }
+    canvas { background: #1c1c1e; border-radius: 8px; width: 100%; height: 180px; margin-top: 15px; }
+  </style>
+</head>
+<body>
+
+  <h2>IMU Sensor Telemetry</h2>
+  <button id="startBtn">Start Motion Sensor Logging</button>
+
+  <div id="status">Status: Waiting for user to tap Start...</div>
+  <canvas id="liveCanvas" width="500" height="180"></canvas>
+
+  <script>
+    const statusDiv = document.getElementById('status');
+    const startBtn = document.getElementById('startBtn');
+    const canvas = document.getElementById('liveCanvas');
+    const ctx = canvas.getContext('2d');
+
+    const maxPoints = 120;
+    const dataBuffer = new Array(maxPoints).fill(0);
+    let isLogging = false;
+
+    function logStatus(msg) {
+      statusDiv.innerHTML += `<br>> ${msg}`;
+      statusDiv.scrollTop = statusDiv.scrollHeight;
+    }
+
+    // 1. Explicit iOS & Android Permission Handler
+    startBtn.addEventListener('click', async () => {
+      // Protocol Check
+      if (location.protocol !== 'https:' && location.hostname !== 'localhost') {
+        logStatus('ERROR: Motion sensors require HTTPS connection!');
+        alert('Sensors blocked! You must host this page on HTTPS (e.g., GitHub Pages).');
+        return;
+      }
+
+      // iOS 13+ Permission API Check
+      if (typeof DeviceMotionEvent !== 'undefined' && typeof DeviceMotionEvent.requestPermission === 'function') {
+        try {
+          const response = await DeviceMotionEvent.requestPermission();
+          if (response === 'granted') {
+            logStatus('iOS Permission: Granted!');
+            initSensorListener();
+          } else {
+            logStatus('iOS Permission: DENIED by user.');
+          }
+        } catch (err) {
+          logStatus('Permission Error: ' + err.message);
+        }
+      } else if ('DeviceMotionEvent' in window) {
+        // Non-iOS or older Android browsers
+        logStatus('Standard Browser API Detected. Initializing...');
+        initSensorListener();
+      } else {
+        logStatus('ERROR: DeviceMotionEvent API not supported on this device.');
+      }
+    });
+
+    // 2. Data Producer (Decoupled Hardware Listener)
+    function initSensorListener() {
+      if (isLogging) return;
+      isLogging = true;
+      startBtn.style.display = 'none';
+
+      let sampleCount = 0;
+      window.addEventListener('devicemotion', (event) => {
+        const rate = event.rotationRate;
+        if (rate && (rate.alpha !== null || rate.beta !== null || rate.gamma !== null)) {
+          sampleCount++;
+          if (sampleCount === 1) logStatus('STREAMING DATA: Sensor events firing!');
+
+          // Capture Gyro Beta (X-axis pitch speed)
+          const val = rate.beta || 0;
+          dataBuffer.push(val);
+          if (dataBuffer.length > maxPoints) dataBuffer.shift();
+        } else {
+          if (sampleCount === 0) logStatus('WARNING: Receiving motion events, but rotationRate is NULL.');
+        }
+      });
+    }
+
+    // 3. UI Consumer (V-Sync Decoupled Graph Render Loop)
+    function draw() {
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+      // Center baseline
+      ctx.strokeStyle = '#444';
+      ctx.beginPath();
+      ctx.moveTo(0, canvas.height / 2);
+      ctx.lineTo(canvas.width, canvas.height / 2);
+      ctx.stroke();
+
+      // Render Telemetry Line
+      if (isLogging) {
+        ctx.strokeStyle = '#30d158';
+        ctx.lineWidth = 2.5;
+        ctx.beginPath();
+        for (let i = 0; i < dataBuffer.length; i++) {
+          const x = (i / (maxPoints - 1)) * canvas.width;
+          const y = (canvas.height / 2) - (dataBuffer[i] * 1.5);
+          if (i === 0) ctx.moveTo(x, y);
+          else ctx.lineTo(x, y);
+        }
+        ctx.stroke();
+      }
+
+      requestAnimationFrame(draw);
+    }
+
+    // Start render loop
+    requestAnimationFrame(draw);
+  </script>
 </body>
 </html>
